@@ -1,0 +1,221 @@
+# Practical Machine Learning / Prediction Assignment
+
+## Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. 
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this data set, the participants were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+
+In this project, our goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to predict the manner in which praticipants did the exercise, which is stored in the target variable "classe".  
+
+
+```{r load_libraries, echo=FALSE}
+# load the necessary libraries quietly
+suppressMessages(suppressWarnings(require(caret, quietly=TRUE)))
+suppressMessages(suppressWarnings(require(randomForest, quietly=TRUE)))
+suppressMessages(suppressWarnings(require(corrplot, quietly=TRUE)))
+```
+
+
+## Download and load the data
+
+Download the data.
+
+```{R, download_data}
+url <- "http://d396qusza40orc.cloudfront.net/predmachlearn/"
+trainingDataFile <- "pml-training.csv"
+testingDataFile <- "pml-testing.csv"
+
+dataDir <- "./"
+
+downloadData <- function() {
+   print(paste(url,trainingDataFile,sep=""))
+   if (!file.exists(trainingDataFile)) {
+      print("Downloading data file")
+         download.file(paste(url,trainingDataFile,sep=""), destfile = trainingDataFile)
+   } else {
+     print("Training file already exists. Skipping download...")
+   }
+
+   print(paste(url,testingDataFile,sep=""))
+   if (!file.exists(testingDataFile)) {
+      print("Downloading data file")
+         download.file(paste(url,testingDataFile,sep=""), destfile = testingDataFile)
+   } else {
+     print("Test file already exists. Skipping download...")
+   }
+   
+   print("Done downloading the data")
+}
+
+downloadData()
+```
+
+Load the data:
+
+```{R, load_data}
+trainingData = read.csv(paste(dataDir,trainingDataFile,sep=""), na.strings=c("", "NA"))
+testingData = read.csv(paste(dataDir,testingDataFile,sep=""), na.strings=c("", "NA"))
+```
+
+## Clean up
+
+Next we check the summary of the data:
+
+```{R summary, eval=FALSE}
+summary(trainingData)
+summary(testingData)
+```
+
+Summarizing the data reveals that there are many NAs for certain features in the data (most of them have ~300 non-NAs out of `r dim(trainingData)[1]`). So by removing them, hopefully, we won't lose much. We can always return to this point if we see that our final prediction model is performing poorly.
+
+```{R, clean_NAs}
+dim(trainingData)
+# print(colSums(is.na(trainingData)))
+# keep the ones with less than 100 NAs
+trainingData.clean <- trainingData[ , colSums(is.na(trainingData)) < 100]
+```
+
+We will next remove the features that doesn't seem to be useful as a predictor, such as timestamps.
+
+```{R remove_unuseful_features}
+notVeryUsefulFeatures = c('X', 'user_name', 'raw_timestamp_part_1', 'raw_timestamp_part_2', 'cvtd_timestamp', 'new_window', 'num_window')
+trainingData.clean <- trainingData.clean[, -which(names(trainingData.clean) %in% notVeryUsefulFeatures)]
+```
+
+Now let's check the correlations between the remaining features:
+
+```{r correlation_matrix, echo=FALSE}
+corrMatrix <- cor(trainingData.clean[sapply(trainingData.clean, is.numeric)], use="pairwise", method="pearson")
+
+ord <- order(corrMatrix[1,])
+corrMatrix <- corrMatrix[ord, ord]
+
+opar <- par(cex=0.5)
+
+corrplot(corrMatrix, mar=c(0,0,1,0))
+
+title(main="Correlation of features using Pearson",
+    sub=paste("R", format(Sys.time(), "%Y-%b-%d %H:%M:%S"), Sys.info()["user"]))
+
+par(opar)
+```
+
+Let's remove the highly correlated (> 0.90) features:
+
+```{r remove_correlated_features}
+highlyCorrelatedFeatures = findCorrelation(corrMatrix, cutoff = .90)
+names(trainingData.clean)[highlyCorrelatedFeatures]
+trainingData.clean = trainingData.clean[,-highlyCorrelatedFeatures]
+dim(trainingData.clean)
+```
+
+The above cleanup removed a total of `r (dim(trainingData)-dim(trainingData.clean))[2]` features out of `r dim(trainingData)[2]`, and now we only have `r dim(trainingData.clean)[2]` features. 
+
+
+## Model building
+
+First let's split the given data set into training and test sets:
+
+```{r split_data}
+numRows <- nrow(trainingData.clean)
+numCols <- ncol(trainingData.clean)
+train <- sample(numRows, 0.8*numRows)
+test <- sample(setdiff(seq_len(numRows), train), 0.2*numRows)
+trainingSet <- trainingData.clean[train,]
+testSet <- trainingData.clean[test,]
+```
+
+This selection splits the data randomly into 2 sets: `r dim(trainingSet)[1]` samples for training and `r dim(testSet)[1]` samples for testing.
+
+Let's try to fit a Random Forest to the data using 500 trees and trying 10 variables for each split :
+
+```{r random_forest}
+set.seed(0)
+rfModel <- randomForest::randomForest(classe ~ .,
+      data=trainingSet, 
+      ntree=500,
+      mtry=7,
+      importance=TRUE,
+      na.action=randomForest::na.roughfix,
+      replace=FALSE)
+rfModel
+```
+
+```{r random_forest_error_plot}
+plot(rfModel)
+```
+
+The above "Error vs. number of trees" plot clearly show that we didn't need all the 500 trees, but could have easily got the same result with ~100 trees. 
+
+Here are the important features:
+```{r random_forest_variable_importance}
+varImpPlot(rfModel, n.var=20, sort = TRUE, type = 1, pch = 19, col = "blue", cex = 1, main = "Importance of Features")
+```
+
+## Cross Validation
+
+We are going to check and optimize the performance of the Random Forest model using cross validation.
+
+```{r cross_validation}
+set.seed(0)
+numColsTS <- ncol(trainingSet)
+numRowsTS <- nrow(trainingSet)
+extTrainingSet <- cbind(trainingSet[1:numColsTS-1], matrix(runif(numRowsTS), numRowsTS, 1))
+result <- replicate(2, rfcv(extTrainingSet, trainingSet$classe), simplify=FALSE)
+error.cv <- sapply(result, "[[", "error.cv")
+matplot(result[[1]]$n.var, cbind(rowMeans(error.cv), error.cv), type="l",
+        lwd=c(2, rep(1, ncol(error.cv))), col=1, lty=1, log="x",
+        xlab="Number of variables", ylab="CV Error")
+```
+
+So the the optimum value of mtry, the number of variables randomly sampled as candidates at each split, is around 10. We can tune it using tuneRF:
+
+```{r tune_mtry}
+set.seed(0)
+tuneRF(trainingSet[,-numColsTS], trainingSet[,numColsTS], stepFactor=0.9, improve=0.000001, trace=TRUE, plot=TRUE)
+```
+
+As can be seen above the best value, 7, is exactly what we have used in our model, so our model should give the minimum OOB (Out-of-Bag) error, which was estimated to be less than 1% for the training data. Now we let's try to verify this using the test set:
+
+```{r predict_testSet}
+pred=predict(rfModel,testSet,type="class")
+```
+
+Here is the confusion matrix:
+```{r confusion_matrix}
+confusionMatrix = confusionMatrix(pred,testSet$classe)
+confusionMatrix
+accuracy <- confusionMatrix$overall[1]
+accuracy
+```
+
+As seen above, random forest shows `r 100*accuracy`% accuracy rate on the test set (i.e. the error rate is less than 1% as expected), which shows that the model generalizes well beyond the training set.
+
+
+## Predictions for the Assignment Test Set
+
+The random forest model seems to predict the target well for the training and test sets. Now let's compute the prediction values for the assignment test set:
+
+```{r predict_test_data}
+answers <- predict(rfModel, testingData)
+answers
+```
+
+Submitting the above results to the website showed 100% success rate, which also verified the quality of the random forest model we built.
+
+```{r create_prediction_files}
+path <- "prediction_files/"
+unlink(path, recursive = TRUE, force = TRUE)
+dir.create(path)
+pml_write_files = function(x) {
+    n = length(x)
+    for (i in 1:n) {
+        filename = paste0("problem_id_", i, ".txt")
+        write.table(x[i], file = file.path(path,filename), quote = FALSE, row.names = FALSE, col.names = FALSE)
+    }
+}
+
+pml_write_files(answers)
+```
